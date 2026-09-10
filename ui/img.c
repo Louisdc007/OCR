@@ -81,6 +81,10 @@ void convert_bw(SDL_Surface *img, Uint8 c_val, int window_size) {
     }
 }
 
+
+
+
+
 SDL_Surface* rotate_img(SDL_Surface *src, double angle_degre) {
     double rad = angle_degre * M_PI / 180.0;
     double cos_a = cos(rad);
@@ -123,6 +127,11 @@ SDL_Surface* rotate_img(SDL_Surface *src, double angle_degre) {
 
     return dest;
 }
+
+
+
+
+
 
 
 double find_angle(SDL_Surface *img) {
@@ -174,6 +183,12 @@ double find_angle(SDL_Surface *img) {
     return best_angle;
 }
 
+
+
+
+
+
+
 SDL_Window* init_window(int width, int height) {
     if (width < 1 || height < 1) return NULL;
 
@@ -191,6 +206,11 @@ SDL_Window* init_window(int width, int height) {
     return window;
 }
 
+
+
+
+
+
 void render_image(SDL_Renderer *renderer, SDL_Surface *surface) {
     SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, surface); // surface = CPU, editable ; texture = GPU, displayable
 
@@ -198,6 +218,10 @@ void render_image(SDL_Renderer *renderer, SDL_Surface *surface) {
     SDL_RenderCopy(renderer, texture, NULL, NULL); // NULL = auto width and height
     SDL_RenderPresent(renderer); // to display
 }
+
+
+
+
 
 int main(int argc, char *argv[]) {
     SDL_Window *window = init_window(800, 600);
