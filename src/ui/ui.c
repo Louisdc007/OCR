@@ -3,9 +3,9 @@
 #include <SDL2/SDL_ttf.h>
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
+#include "explorer.h"
 #include "img.h"
 
 #define WIN_W 1280
@@ -13,7 +13,8 @@
 #define BTN_W 200
 #define BTN_H 50
 #define BAR_H 90
-#define FONT_PATH "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+#define FONT_FILE "assets/DejaVuSans-Bold.ttf"
+#define FONT_SYSTEM_PATH "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 #define FONT_SIZE 20
 #define OUTPUT_DIR "."
 
@@ -34,7 +35,21 @@ typedef struct {
     SDL_Rect open_label_size;
     SDL_Rect start_label_size;
     SDL_Rect status_label_size;
+
+    Explorer *explorer;
 } AppState;
+
+static TTF_Font *open_font(void) {
+    char path[1024];
+    char *base = SDL_GetBasePath();
+    if (base) {
+        snprintf(path, sizeof(path), "%s%s", base, FONT_FILE);
+        SDL_free(base);
+        TTF_Font *font = TTF_OpenFont(path, FONT_SIZE);
+        if (font) return font;
+    }
+    return TTF_OpenFont(FONT_SYSTEM_PATH, FONT_SIZE);
+}
 
 static void set_texture(AppState *app, SDL_Surface *surf) {
     if (app->texture) SDL_DestroyTexture(app->texture);
@@ -92,6 +107,12 @@ static void draw_label_centered(SDL_Renderer *r, SDL_Texture *t, SDL_Rect size, 
 }
 
 static void render(AppState *app) {
+    if (app->explorer) {
+        explorer_render(app->explorer);
+        SDL_RenderPresent(app->renderer);
+        return;
+    }
+
     SDL_SetRenderDrawColor(app->renderer, 30, 30, 30, 255);
     SDL_RenderClear(app->renderer);
 
@@ -112,24 +133,19 @@ static void render(AppState *app) {
     SDL_RenderPresent(app->renderer);
 }
 
-static void open_image(AppState *app) {
-    const char *home = getenv("HOME");
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd),
-             "zenity --file-selection --title='Choisir une image' --filename='%s/' "
-             "--file-filter='Images | *.png *.jpg *.jpeg *.bmp' 2>/dev/null",
-             home ? home : "");
-    FILE *fp = popen(cmd, "r");
-    if (fp == NULL) return;
+static void close_explorer(AppState *app) {
+    explorer_destroy(app->explorer);
+    app->explorer = NULL;
+}
 
-    char path[1024] = {0};
-    if (fgets(path, sizeof(path), fp) == NULL) {
-        pclose(fp);
-        return;
-    }
-    pclose(fp);
-    path[strcspn(path, "\n")] = '\0';
+static void open_explorer(AppState *app) {
+    if (app->explorer) return;
+    SDL_Rect area = {0, 0, WIN_W, WIN_H};
+    app->explorer = explorer_create(app->renderer, app->font, area, NULL);
+    if (app->explorer == NULL) set_status(app, "Explorateur indisponible");
+}
 
+static void load_image(AppState *app, const char *path) {
     SDL_Surface *img = img_load(path);
     if (img == NULL) {
         set_status(app, "Image illisible");
@@ -177,7 +193,7 @@ static void start_processing(AppState *app) {
     }
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         fprintf(stderr, "SDL_Init : %s\n", SDL_GetError());
         return 1;
@@ -198,10 +214,9 @@ int main(void) {
 
     AppState app = {0};
 
-    app.font = TTF_OpenFont(FONT_PATH, FONT_SIZE);
+    app.font = open_font();
     if (app.font == NULL) {
-        fprintf(stderr, "TTF_OpenFont : %s\n", TTF_GetError());
-        fprintf(stderr, "Vérifiez FONT_PATH ou installez fonts-dejavu-core\n");
+        fprintf(stderr, "Police introuvable : copiez DejaVuSans-Bold.ttf dans assets/\n");
     }
 
     app.window = SDL_CreateWindow("World solver",
@@ -230,6 +245,8 @@ int main(void) {
     app.open_label  = make_label(&app, "Ouvrir image", &app.open_label_size);
     app.start_label = make_label(&app, "Start traitement", &app.start_label_size);
 
+    if (argc > 1) load_image(&app, argv[1]);
+
     int running = 1;
     SDL_Event event;
     render(&app);
@@ -237,26 +254,33 @@ int main(void) {
     while (running) {
         SDL_WaitEvent(&event);
 
-        switch (event.type) {
-        case SDL_QUIT:
+        if (event.type == SDL_QUIT) {
             running = 0;
-            break;
-
-        case SDL_MOUSEBUTTONDOWN:
-            if (event.button.button == SDL_BUTTON_LEFT) {
-                SDL_Point p = {event.button.x, event.button.y};
-                if (SDL_PointInRect(&p, &OPEN_BTN)) {
-                    open_image(&app);
-                } else if (SDL_PointInRect(&p, &START_BTN)) {
-                    start_processing(&app);
-                }
+        } else if (event.type == SDL_DROPFILE) {
+            close_explorer(&app);
+            load_image(&app, event.drop.file);
+            SDL_free(event.drop.file);
+        } else if (app.explorer) {
+            ExplorerStatus status = explorer_handle_event(app.explorer, &event);
+            if (status == EXPLORER_CHOSEN) {
+                load_image(&app, explorer_path(app.explorer));
+                close_explorer(&app);
+            } else if (status == EXPLORER_CANCELLED) {
+                close_explorer(&app);
             }
-            break;
+        } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            SDL_Point p = {event.button.x, event.button.y};
+            if (SDL_PointInRect(&p, &OPEN_BTN)) {
+                open_explorer(&app);
+            } else if (SDL_PointInRect(&p, &START_BTN)) {
+                start_processing(&app);
+            }
         }
 
-        render(&app);
+        if (running) render(&app);
     }
 
+    close_explorer(&app);
     if (app.open_label)   SDL_DestroyTexture(app.open_label);
     if (app.start_label)  SDL_DestroyTexture(app.start_label);
     if (app.status_label) SDL_DestroyTexture(app.status_label);

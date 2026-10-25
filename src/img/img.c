@@ -17,9 +17,9 @@
 #define ANGLE_MAX         30.0
 #define ANGLE_STEP        0.5
 #define BW_C_VALUE        0
-#define AUTO_C_FACTOR     0.33
+#define AUTO_C_FACTOR     0.4
 #define AUTO_C_MIN        25
-#define AUTO_C_MAX        80
+#define AUTO_C_MAX        100
 #define ANGLE_FINE_STEP   0.1
 
 #define MIN_LETTER_H_PX   4
@@ -28,6 +28,17 @@
 #define BLOCK_GAP_RATIO   1.4
 #define LINE_GAP_RATIO    0.5
 #define WORD_GAP_RATIO    1.5
+#define WORD_MIN_H_RATIO  0.6
+#define TIGHT_MIN_RATIO   0.6
+#define TIGHT_MAX_RATIO   1.6
+#define MIN_WORD_LETTERS  3
+#define WORD_H_LO         0.8
+#define WORD_H_HI         1.25
+#define WORD_W_MAX        1.8
+#define SPLIT_MIN_RATIO   1.3
+#define SPLIT_CHAR_RATIO  0.72
+#define SPLIT_WINDOW      0.3
+#define SPLIT_MAX_INK     0.3
 #define LETTER_PAD        2
 
 static inline Uint32 *pix_at(SDL_Surface *s, int x, int y) {
@@ -480,6 +491,21 @@ static int cluster_axis(const Box *b, int *idx, int n, int axis, double thr, int
     return k + 1;
 }
 
+static int keep_map(const int *cnt, int n, int *map) {
+    int *tmp = malloc((size_t)n * sizeof(int));
+    if (!tmp) {
+        for (int i = 0; i < n; i++) map[i] = i;
+        return n;
+    }
+    memcpy(tmp, cnt, (size_t)n * sizeof(int));
+    int med = median_int(tmp, n);
+    free(tmp);
+    int k = 0;
+    for (int i = 0; i < n; i++)
+        map[i] = (cnt[i] >= 0.4 * med) ? k++ : -1;
+    return k;
+}
+
 static Box box_union(Box a, Box c) {
     int x0 = a.x < c.x ? a.x : c.x;
     int y0 = a.y < c.y ? a.y : c.y;
@@ -505,6 +531,71 @@ static int save_letter(SDL_Surface *bw, Box b, const char *path) {
     return rc;
 }
 
+static int shrink_box(const Uint8 *mask, int w, Box *b) {
+    int x0 = b->x + b->w, x1 = b->x - 1, y0 = b->y + b->h, y1 = b->y - 1;
+    for (int y = b->y; y < b->y + b->h; y++)
+        for (int x = b->x; x < b->x + b->w; x++)
+            if (mask[(size_t)y * w + x]) {
+                if (x < x0) x0 = x;
+                if (x > x1) x1 = x;
+                if (y < y0) y0 = y;
+                if (y > y1) y1 = y;
+            }
+    if (x1 < x0 || y1 < y0) return 0;
+    b->x = x0;
+    b->y = y0;
+    b->w = x1 - x0 + 1;
+    b->h = y1 - y0 + 1;
+    return 1;
+}
+
+static int split_touching(const Uint8 *mask, int w, Box in, Box *out, int max_out) {
+    if (max_out < 1) return 0;
+    double ratio = (double)in.w / in.h;
+    if (in.w < SPLIT_MIN_RATIO * in.h || in.h < MIN_LETTER_H_PX || ratio > 12.0) {
+        out[0] = in;
+        return 1;
+    }
+    int n = (int)(in.w / (SPLIT_CHAR_RATIO * in.h) + 0.5);
+    if (n < 2) {
+        out[0] = in;
+        return 1;
+    }
+    int *col = calloc((size_t)in.w, sizeof(int));
+    if (!col) {
+        out[0] = in;
+        return 1;
+    }
+    for (int x = 0; x < in.w; x++)
+        for (int y = in.y; y < in.y + in.h; y++)
+            col[x] += mask[(size_t)y * w + in.x + x];
+
+    int span = (int)(SPLIT_WINDOW * in.h);
+    if (span < 1) span = 1;
+    int cut = -1;
+    int ideal = (int)((double)in.w / n + 0.5);
+    int best = in.h + 1;
+    for (int x = ideal - span; x <= ideal + span; x++) {
+        if (x < (int)(0.3 * in.h) || x > in.w - (int)(0.3 * in.h)) continue;
+        int c = col[x];
+        if (c < best || (c == best && abs(x - ideal) < abs(cut - ideal))) {
+            best = c;
+            cut = x;
+        }
+    }
+    free(col);
+    if (cut < 0 || best > SPLIT_MAX_INK * in.h) {
+        out[0] = in;
+        return 1;
+    }
+    Box l = {in.x, in.y, cut, in.h};
+    Box r = {in.x + cut, in.y, in.w - cut, in.h};
+    int k = 0;
+    if (shrink_box(mask, w, &l)) k += split_touching(mask, w, l, out + k, max_out - k);
+    if (k < max_out && shrink_box(mask, w, &r)) k += split_touching(mask, w, r, out + k, max_out - k);
+    return k;
+}
+
 int img_extract_letters(SDL_Surface *bw, const char *out_root, ExtractInfo *info) {
     if (bw == NULL || out_root == NULL) return -1;
     if (info) memset(info, 0, sizeof *info);
@@ -520,6 +611,16 @@ int img_extract_letters(SDL_Surface *bw, const char *out_root, ExtractInfo *info
 
     Box *all = NULL;
     int nall = find_components(mask, w, h, &all);
+    if (nall > 0) {
+        Box *sp = malloc((size_t)nall * 8 * sizeof(Box));
+        if (sp) {
+            int ns = 0;
+            for (int i = 0; i < nall; i++) ns += split_touching(mask, w, all[i], sp + ns, 8);
+            free(all);
+            all = sp;
+            nall = ns;
+        }
+    }
     free(mask);
     if (nall <= 0) {
         fprintf(stderr, "Aucune composante trouvée\n");
@@ -553,6 +654,18 @@ int img_extract_letters(SDL_Surface *bw, const char *out_root, ExtractInfo *info
 
     for (int i = 0; i < nb; i++) hs[i] = b[i].h;
     m_h = median_int(hs, nb);
+    {
+        int kept = 0;
+        for (int i = 0; i < nb; i++) {
+            if (b[i].h < TIGHT_MIN_RATIO * m_h || b[i].h > TIGHT_MAX_RATIO * m_h) continue;
+            if (b[i].w > TIGHT_MAX_RATIO * m_h) continue;
+            b[kept++] = b[i];
+        }
+        nb = kept;
+        if (nb == 0) goto cleanup;
+        for (int i = 0; i < nb; i++) hs[i] = b[i].h;
+        m_h = median_int(hs, nb);
+    }
 
     for (int i = 0; i < nb; i++) idx[i] = i;
     BlockList bl = {0};
@@ -583,8 +696,32 @@ int img_extract_letters(SDL_Surface *bw, const char *out_root, ExtractInfo *info
         int rows = cluster_axis(b, g->idx, g->n, 3, LINE_GAP_RATIO * gh, row_l);
         int cols = cluster_axis(b, g->idx, g->n, 2, LINE_GAP_RATIO * gh, col_l);
 
+        int *rmap = malloc((size_t)rows * sizeof(int));
+        int *cmap = malloc((size_t)cols * sizeof(int));
+        int *cnt = calloc((size_t)(rows > cols ? rows : cols), sizeof(int));
+        if (!rmap || !cmap || !cnt) {
+            free(rmap);
+            free(cmap);
+            free(cnt);
+            free(row_l);
+            free(col_l);
+            free(bl.v);
+            goto cleanup;
+        }
+        for (int i = 0; i < g->n; i++) cnt[row_l[g->idx[i]]]++;
+        int nr = keep_map(cnt, rows, rmap);
+        memset(cnt, 0, (size_t)(rows > cols ? rows : cols) * sizeof(int));
+        for (int i = 0; i < g->n; i++) cnt[col_l[g->idx[i]]]++;
+        int nc = keep_map(cnt, cols, cmap);
+        free(cnt);
+        int old_cols = cols;
+        rows = nr;
+        cols = nc;
+
         Box *cells = calloc((size_t)rows * cols, sizeof(Box));
         if (!cells) {
+            free(rmap);
+            free(cmap);
             free(row_l);
             free(col_l);
             free(bl.v);
@@ -592,7 +729,9 @@ int img_extract_letters(SDL_Surface *bw, const char *out_root, ExtractInfo *info
         }
         for (int i = 0; i < g->n; i++) {
             int id = g->idx[i];
-            Box *c = &cells[(size_t)row_l[id] * cols + col_l[id]];
+            int rr = rmap[row_l[id]], cc = cmap[col_l[id]];
+            if (rr < 0 || cc < 0) continue;
+            Box *c = &cells[(size_t)rr * cols + cc];
             *c = (c->w == 0) ? b[id] : box_union(*c, b[id]);
         }
 
@@ -608,6 +747,9 @@ int img_extract_letters(SDL_Surface *bw, const char *out_root, ExtractInfo *info
             }
         }
         free(cells);
+        free(rmap);
+        free(cmap);
+        (void)old_cols;
         free(row_l);
         free(col_l);
         if (info) {
@@ -616,13 +758,22 @@ int img_extract_letters(SDL_Surface *bw, const char *out_root, ExtractInfo *info
         }
     }
 
+    int ref_blk = -1;
+    for (int bi = 0; bi < bl.n; bi++)
+        if (bi != grid_blk && (ref_blk < 0 || bl.v[bi].n > bl.v[ref_blk].n)) ref_blk = bi;
+    double ref_h = 0;
+    if (ref_blk >= 0) {
+        for (int i = 0; i < bl.v[ref_blk].n; i++) hs[i] = b[bl.v[ref_blk].idx[i]].h;
+        ref_h = median_int(hs, bl.v[ref_blk].n);
+    }
+
     int n_words = 0;
     for (int bi = 0; bi < bl.n; bi++) {
         if (bi == grid_blk) continue;
         Block *blk = &bl.v[bi];
         for (int i = 0; i < blk->n; i++) hs[i] = b[blk->idx[i]].h;
         double bh = median_int(hs, blk->n);
-
+        if (bh < WORD_MIN_H_RATIO * ref_h) continue;
         int nlines = cluster_axis(b, blk->idx, blk->n, 3, LINE_GAP_RATIO * bh, label);
         int *line = malloc((size_t)blk->n * sizeof(int));
         if (!line) continue;
@@ -639,7 +790,12 @@ int img_extract_letters(SDL_Surface *bw, const char *out_root, ExtractInfo *info
             for (int i = 1; i <= cnt; i++) {
                 int cut = (i == cnt) || (b[line[i]].x - max_end > WORD_GAP_RATIO * bh);
                 if (cut) {
-                    if (i - start >= 2) {
+                    int ok = i - start >= MIN_WORD_LETTERS;
+                    for (int j = start; ok && j < i; j++) {
+                        const Box *q = &b[line[j]];
+                        if (q->h < WORD_H_LO * ref_h || q->h > WORD_H_HI * ref_h || q->w > WORD_W_MAX * ref_h) ok = 0;
+                    }
+                    if (ok) {
                         n_words++;
                         char dir[1024], path[1100];
                         snprintf(dir, sizeof(dir), "%s/words/%d", out_root, n_words);
